@@ -1,0 +1,67 @@
+name: Daily Finance Briefing
+
+on:
+  schedule:
+    # cron 格式: 分 时 日 月 周 (注意：GitHub 默认使用 UTC 时间)
+    # UTC 0:00 相当于北京时间 (CST) 早上 08:00
+    - cron: '0 0 * * *'
+  
+  # 允许手动触发测试
+  workflow_dispatch:
+
+jobs:
+  run-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Dify Workflow & Send to Telegram
+        env:
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+          DIFY_BASE_URL: ${{ secrets.DIFY_BASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          echo "1. 正在调用 Dify 工作流..."
+          
+          # 发送 POST 请求触发 Dify 工作流
+          RESPONSE=$(curl -s -X POST "${DIFY_BASE_URL}/workflows/run" \
+            -H "Authorization: Bearer ${DIFY_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "inputs": {},
+              "response_mode": "blocking",
+              "user": "github_cron_bot"
+            }')
+
+          echo "Dify 响应结果: $RESPONSE"
+
+          # 使用 python 解析 json 文本
+          PYTHON_SCRIPT=$(cat << 'EOF'
+          import json, os
+          res_str = os.environ.get('RESPONSE', '{}')
+          try:
+              data = json.loads(res_str)
+              text = data.get('data', {}).get('outputs', {}).get('text', '')
+              if not text:
+                  text = "Dify 未返回任何输出文本，请检查工作流配置。"
+          except Exception as e:
+              text = f"解析 Dify 响应失败: {e}"
+          print(text)
+          EOF
+          )
+
+          TEXT=$(RESPONSE="$RESPONSE" python3 -c "$PYTHON_SCRIPT")
+
+          echo "提取的主体内容:"
+          echo "$TEXT"
+
+          echo "2. 正在推送到 Telegram..."
+          
+          # 推送到 Telegram Bot
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg chat_id "$TELEGRAM_CHAT_ID" \
+              --arg text "$TEXT" \
+              '{chat_id: $chat_id, text: $text}')"
+          
+          echo "推送完成！"
