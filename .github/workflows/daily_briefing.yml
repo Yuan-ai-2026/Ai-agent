@@ -2,7 +2,11 @@ name: Daily Finance Briefing
 
 on:
   schedule:
+    # cron 格式: 分 时 日 月 周 (注意：GitHub 默认使用 UTC 时间)
+    # UTC 0:00 相当于北京时间 (CST) 早上 08:00
     - cron: '0 0 * * *'
+  
+  # 允许手动触发测试
   workflow_dispatch:
 
 jobs:
@@ -28,49 +32,36 @@ jobs:
               "user": "github_cron_bot"
             }')
 
-          echo "Dify 原始响应逻辑已获取..."
+          echo "Dify 响应结果: $RESPONSE"
 
-          # 使用 Python 处理 JSON 并兼容不同的输出字段名称
+          # 使用 python 解析 json 文本
           PYTHON_SCRIPT=$(cat << 'EOF'
           import json, os
-
           res_str = os.environ.get('RESPONSE', '{}')
           try:
               data = json.loads(res_str)
-              outputs = data.get('data', {}).get('outputs', {})
-              
-              # 自动适配常用的输出字段名 (text, result, output 等)
-              text = outputs.get('text') or outputs.get('result') or outputs.get('output')
-              
-              # 如果 outputs 是单一字符串值或找不到 key，尝试提取第一个 value
-              if not text and isinstance(outputs, dict) and len(outputs) > 0:
-                  text = list(outputs.values())[0]
-
+              text = data.get('data', {}).get('outputs', {}).get('text', '')
               if not text:
-                  text = "Dify 已执行成功，但未捕获到 outputs 中的文本。请检查 Dify 工作流结束节点的变量输出名称。"
+                  text = "Dify 未返回任何输出文本，请检查工作流配置。"
           except Exception as e:
               text = f"解析 Dify 响应失败: {e}"
-
           print(text)
           EOF
           )
 
           TEXT=$(RESPONSE="$RESPONSE" python3 -c "$PYTHON_SCRIPT")
 
-          echo "=== 提取的主体内容 ==="
+          echo "提取的主体内容:"
           echo "$TEXT"
-          echo "========================"
 
           echo "2. 正在推送到 Telegram..."
           
-          # 格式化并清理 Bot Token（防止多填 bot 前缀或多余空格）
-          CLEAN_TOKEN=$(echo "${TELEGRAM_BOT_TOKEN}" | sed 's/^bot//i' | xargs)
-          
-          TG_RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${CLEAN_TOKEN}/sendMessage" \
+          # 推送到 Telegram Bot
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
               --arg chat_id "$TELEGRAM_CHAT_ID" \
               --arg text "$TEXT" \
-              '{chat_id: $chat_id, text: $text}')")
+              '{chat_id: $chat_id, text: $text}')"
           
-          echo "Telegram 接口响应: $TG_RESPONSE"
+          echo "推送完成！"
