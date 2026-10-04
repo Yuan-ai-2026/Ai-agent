@@ -2,16 +2,17 @@ name: Daily Finance Briefing
 
 on:
   schedule:
-    # cron 格式: 分 时 日 月 周 (注意：GitHub 默认使用 UTC 时间)
-    # UTC 0:00 相当于北京时间 (CST) 早上 08:00
+    # 每天北京时间 08:00 执行
+    # GitHub Actions 使用 UTC
     - cron: '0 0 * * *'
-  
-  # 允许手动触发测试
+
+  # 允许手动运行测试
   workflow_dispatch:
 
 jobs:
   run-and-push:
     runs-on: ubuntu-latest
+
     steps:
       - name: Trigger Dify Workflow & Send to Telegram
         env:
@@ -19,49 +20,143 @@ jobs:
           DIFY_BASE_URL: ${{ secrets.DIFY_BASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
         run: |
+          set -e
+
+          echo "======================================"
           echo "1. 正在调用 Dify 工作流..."
-          
-          # 发送 POST 请求触发 Dify 工作流
-          RESPONSE=$(curl -s -X POST "${DIFY_BASE_URL}/workflows/run" \
+          echo "======================================"
+
+          # 使用 streaming 模式，避免长时间 blocking 导致 504
+          curl -sS --no-buffer \
+            -X POST "${DIFY_BASE_URL}/workflows/run" \
             -H "Authorization: Bearer ${DIFY_API_KEY}" \
             -H "Content-Type: application/json" \
             -d '{
               "inputs": {},
-              "response_mode": "blocking",
+              "response_mode": "streaming",
               "user": "github_cron_bot"
-            }')
+            }' \
+            > dify_stream.txt
 
-          echo "Dify 响应结果: $RESPONSE"
+          echo "Dify 工作流调用结束"
 
-          # 使用 python 解析 json 文本
-          PYTHON_SCRIPT=$(cat << 'EOF'
-          import json, os
-          res_str = os.environ.get('RESPONSE', '{}')
-          try:
-              data = json.loads(res_str)
-              text = data.get('data', {}).get('outputs', {}).get('text', '')
-              if not text:
-                  text = "Dify 未返回任何输出文本，请检查工作流配置。"
-          except Exception as e:
-              text = f"解析 Dify 响应失败: {e}"
-          print(text)
-          EOF
-          )
+          echo "======================================"
+          echo "2. 解析 Dify 最终结果..."
+          echo "======================================"
 
-          TEXT=$(RESPONSE="$RESPONSE" python3 -c "$PYTHON_SCRIPT")
+          python3 << 'PY'
+          import json
 
-          echo "提取的主体内容:"
-          echo "$TEXT"
+          output = ""
 
-          echo "2. 正在推送到 Telegram..."
-          
-          # 推送到 Telegram Bot
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg chat_id "$TELEGRAM_CHAT_ID" \
-              --arg text "$TEXT" \
-              '{chat_id: $chat_id, text: $text}')"
-          
-          echo "推送完成！"
+          with open("dify_stream.txt", "r", encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+
+                  if not line.startswith("data:"):
+                      continue
+
+                  raw = line[5:].strip()
+
+                  try:
+                      data = json.loads(raw)
+                  except Exception:
+                      continue
+
+                  # 找到 workflow_finished 事件
+                  if data.get("event") == "workflow_finished":
+                      workflow_data = data.get("data", {})
+
+                      outputs = workflow_data.get("outputs", {})
+
+                      # 我们之前已经把 Dify 结束节点改成 text
+                      output = outputs.get("text", "")
+
+                      # 如果 text 没有，兼容之前的 summary
+                      if not output:
+                          output = outputs.get("summary", "")
+
+          if not output:
+              print("ERROR: Dify 没有返回最终文本")
+              exit(1)
+
+          with open("finance_report.txt", "w", encoding="utf-8") as f:
+              f.write(output)
+
+          print("Dify 报告获取成功！")
+          print("报告长度:", len(output))
+          PY
+
+          echo "======================================"
+          echo "3. 检查报告..."
+          echo "======================================"
+
+          cat finance_report.txt
+
+          echo ""
+          echo "======================================"
+          echo "4. 推送 Telegram..."
+          echo "======================================"
+
+          # Telegram 单条消息最大约 4096 字符
+          # 因此把长报告自动拆分
+          python3 << 'PY'
+          import os
+          import json
+          import urllib.request
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+
+          with open("finance_report.txt", "r", encoding="utf-8") as f:
+              text = f.read()
+
+          # Telegram 每条消息控制在 4000 字符以内
+          chunks = []
+
+          while len(text) > 4000:
+              # 尽量在换行处切割
+              pos = text.rfind("\n", 0, 4000)
+
+              if pos < 1000:
+                  pos = 4000
+
+              chunks.append(text[:pos])
+              text = text[pos:]
+
+          if text:
+              chunks.append(text)
+
+          print(f"报告共拆分为 {len(chunks)} 条 Telegram 消息")
+
+          url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+          for i, chunk in enumerate(chunks, 1):
+
+              payload = {
+                  "chat_id": chat_id,
+                  "text": chunk
+              }
+
+              data = json.dumps(payload).encode("utf-8")
+
+              req = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers={
+                      "Content-Type": "application/json"
+                  },
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req) as response:
+                  result = response.read().decode("utf-8")
+
+              print(f"Telegram 第 {i}/{len(chunks)} 条发送成功")
+
+          print("======================================")
+          print("全部推送完成！")
+          print("======================================")
+          PY
