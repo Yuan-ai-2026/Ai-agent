@@ -104,6 +104,9 @@ jobs:
           # 清理 Markdown 粗体符号
           output = output.replace("**", "")
 
+          # 清理 Markdown 粗体符号
+          output = output.replace("##", "")
+          
           # 清理 Dify/DeepSeek reasoning 标记
           output = output.replace("<!--dify-deepseek-reasoning-->", "")
           
