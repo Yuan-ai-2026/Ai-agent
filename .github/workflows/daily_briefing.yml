@@ -2,11 +2,8 @@ name: Daily Finance Briefing
 
 on:
   schedule:
-    # 每天北京时间 08:00 执行
-    # GitHub Actions 使用 UTC
-    - cron: '0 0 * * *'
-
-  # 允许手动运行测试
+    - cron: '30 7 * * *'
+      timezone: "Asia/Shanghai"
   workflow_dispatch:
 
 jobs:
